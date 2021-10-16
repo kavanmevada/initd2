@@ -1,0 +1,16 @@
+ip = '127.0.1.1'
+[keys.subkeys]
+github = 'xxxxxxxxx
+xxxxxxxx'
+
+[service]
+label = 'service_name'
+travis = 'yyyyyyyy
+yy yyyyyyy'
+requires = [ 'x,x', 'y
+yyy
+yysy', 'zz zzz']
+
+
+[hello]
+twitter = 'id'
