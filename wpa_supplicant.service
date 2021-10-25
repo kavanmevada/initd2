@@ -1,0 +1,25 @@
+ip = '127.0.0.1'
+
+[service]
+Label = 'system.sshd.org'
+Program = ['wpa_supplicant', '-c', '~/.config/"My Config"', 'ScoobyDoo', 'password', 'scooby']
+
+BroadcastDomain = 'network'
+SuccessCode = 145
+
+Requires = ['network']
+Wants = ['ssh']
+
+
+[alive-on]
+JobBroadcast = 'network-up'
+ExitCode = 'on-failure'
+
+[security]
+UserName = nobody
+GroupName = nobody
+
+[job]
+ThrottleInterval = 30
+MaxThrottleCount = 5
+TimeOut = 40

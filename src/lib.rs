@@ -1,6 +1,7 @@
 //#![no_std]
 #![feature(fn_traits)]
 #![feature(unboxed_closures)]
+
 extern crate alloc;
 
 #[macro_export]
@@ -20,43 +21,47 @@ macro_rules! syscall {
 
 #[test]
 fn test_run() -> Result<(), &'static str> {
-    let mut poller = poller::epoll::<10>::init()?;
 
-    poller
-        .watch_on_socket("test.service", "example.sock")
-        .expect("Error creating socket!");
+    let mut manager = manager::default();
+    manager.run("dhcpcd");
 
-    poller
-        .watch_on_timer(10000, "test.service")
-        .expect("Error creating timer!");
 
-    poller.watch_on_file("foo.txt", "test.service", libc::IN_CLOSE_WRITE)
-        .expect("Error creating watcher!");
 
-    let mut thread_id = 0;
 
-    syscall!(pthread_create(
-        &mut thread_id as *mut libc::pthread_t,
-        core::ptr::null(),
-        closure,
-        core::ptr::null_mut()
-    ))?;
 
-    poller.wait(|fd| {
-        println!("{:?}", std::time::Instant::now());
-        // service::read(fd as i32, |key, mut value| {
-        //     println!(
-        //         "{} = {:?} {:?} {:?}",
-        //         key,
-        //         value.next(),
-        //         value.next(),
-        //         value.next()
-        //     );
-        // })
-        // .unwrap();
-    });
+    // let service = service::service::open("dhcpcd.service", |key, value| {
+    //     println!("{} = {:?}", key, value);
+    // })?;
+    
 
-    syscall!(pthread_join(thread_id, core::ptr::null_mut()))?;
+
+    // let mut poller = poller::epoll::<10>::init()?;
+
+    // poller
+    //     .watch_on_socket("test.service", "example.sock")
+    //     .expect("Error creating socket!");
+
+    // poller
+    //     .watch_on_timer(10000, "test.service")
+    //     .expect("Error creating timer!");
+
+    // poller.watch_on_file("foo.txt", "test.service", libc::IN_CLOSE_WRITE)
+    //     .expect("Error creating watcher!");
+
+    // let mut thread_id = 0;
+
+    // syscall!(pthread_create(
+    //     &mut thread_id as *mut libc::pthread_t,
+    //     core::ptr::null(),
+    //     closure,
+    //     core::ptr::null_mut()
+    // ))?;
+
+    // poller.wait(|fd| {
+    //     println!("{:?}", std::time::Instant::now());
+    // });
+
+    // syscall!(pthread_join(thread_id, core::ptr::null_mut()))?;
 
     Ok(())
 }
@@ -72,73 +77,129 @@ extern "C" fn closure(_: *mut libc::c_void) -> *mut libc::c_void {
     0 as *mut libc::c_void
 }
 
-mod service {
-    pub struct entries<'a>(Option<&'a str>);
 
-    impl<'a> core::fmt::Display for entries<'a> {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_list().entries(["", "", ""]).finish()
+#[derive(Debug, Default)]
+pub struct manager {
+    running: Vec<String>
+}
+
+impl manager {
+    pub fn run(&mut self, name: &str) -> bool {
+        if self.running.contains(&name.to_owned()) {
+            return true
         }
-    }
 
-    impl<'a> Iterator for entries<'a> {
-        type Item = &'a str;
-        fn next(&mut self) -> Option<Self::Item> {
-            if let Some((next, remain)) = self.0.and_then(|s| s.split_once('\'')) {
-                self.0 = Some(remain);
-                return Some(next);
-            } else if let Some(next) = self.0.take() {
-                return Some(next);
-            }
-
-            None
-        }
-    }
-
-    pub fn read<F>(fd: i32, mut f: F) -> Result<(), &'static str>
-    where
-        F: FnMut(&str, entries),
-    {
-        let wildcards = ['\n', '\r', '\t', ' ', '[', ']'];
-
-        let (mut offset, mut quote) = (0, 0);
-        let mut buffer = alloc::string::String::new();
-
-        let mut b: u8 = 0;
-        while syscall!(read(fd as i32, &mut b as *mut _ as *mut libc::c_void, 1))?.is_positive() {
-            let mut c = b as char;
-
-            if c as char == '\'' {
-                quote += 1;
-                continue;
-            }
-
-            if quote % 2 != 0 || (quote % 2 == 0 && (c == ',' || !wildcards.contains(&c))) {
-                if quote % 2 == 0 && c == ',' {
-                    c = '\''
+        let mut ret = false;
+        if let Ok(mut service) = service::open(&(name.to_owned() + ".service")) {
+            ret = true;
+            while let Some((key, value)) = service.entry() {
+                if key == "service.Requires" {
+                    ret = value.split('\'').all(|v| self.run(v));
                 }
-                buffer.push(c);
-            }
 
-            if quote % 2 != 0 || c != '\n' {
-                continue;
-            }
+                else if key == "service.Program" {
+                    println!("{} => {:?}", name, value.split('\'').collect::<Vec<_>>());
 
-            if let Some((key, value)) = buffer.split_once('=') {
-                f(key, entries(Some(value)));
-                buffer.drain(offset..);
-            } else if buffer.len() > 0 {
-                if offset != buffer.len() {
-                    buffer.drain(..offset);
-                    buffer.push('.')
+                    let t = std::thread::spawn(|| {
+                        let ret = std::process::Command::new("gnome-control-center").status().unwrap();
+                        dbg!(ret);
+                    });
+
+                    t.join();
+
+
+                    // self.inner.spawn(imp::Stdio::Inherit, true).map(Child::from_inner);
                 }
-                offset = buffer.len()
             }
+
+            self.running.push(name.to_owned());
         }
 
-        Ok(())
+        ret
     }
 }
+
+
+pub struct service {
+    fd: i32,
+    buffer: String,
+    wilds: [char; 5],
+    drain: bool,
+    label: usize,
+}
+
+#[derive(Debug)]
+pub enum value<'a> {
+    single(&'a str),
+    array(std::str::Split<'a, char>)
+}
+
+impl service {
+    pub fn open<'a>(name: &'a str) -> Result<Self, &'static str> {
+        let mut cname = alloc::vec![0i8; name.len() + 1];
+        name.bytes()
+            .zip(cname.iter_mut())
+            .for_each(|(b, ptr)| *ptr = b as i8);
+        Ok(Self {
+            fd: syscall!(open(cname.as_ptr(), libc::O_RDONLY))?,
+            buffer: Default::default(),
+            wilds: ['\r', '\t', ' ', '[', ']'],
+            drain: false,
+            label: 0
+        })
+    }
+
+    pub fn entry<'a>(&'a mut self) -> Option<(&'a str,&'a str)> {
+        let mut b: u8 = 0;
+        let mut isquote = false;
+        let mut ret = None;
+        loop {
+            if self.drain {
+                self.buffer.drain(self.label..);
+                self.drain = false;
+            }
+
+            if syscall!(read(self.fd as i32, &mut b as *mut _ as *mut libc::c_void, 1)) == Ok(0) {
+                self.buffer.split_once('=')
+                .and_then(|pair| ret.replace((pair.0, pair.1)));
+                self.label = 0;
+                self.drain = true;
+                break;
+            }
+
+            match b as char {
+                '\0' => return None,
+                '\n' if !isquote && self.buffer.contains('=') => {
+                    if let Some(pair) =  self.buffer.split_once('=') {
+                        ret.replace((pair.0, pair.1));
+                        self.drain = true;
+                    }
+
+                    break;
+                },
+                '[' | '\n' if !isquote && !self.buffer.contains('=') => {
+                    if !self.buffer.is_empty() {
+                        if !self.buffer.ends_with('.') {
+                            self.buffer.push('.')
+                        }
+                        self.label = self.buffer.len();
+                    }
+
+                    if b as char == '[' { self.buffer.clear() }
+                },
+                '\'' => isquote = !isquote,
+                ',' if !isquote => self.buffer.push('\''),
+                _ if self.wilds.contains(&(b as char)) && !isquote => continue,
+                _ => self.buffer.push(b as char),
+            }
+        }
+
+        ret
+    }
+}
+
+
+
 
 mod net {
     pub struct socket(i32);
@@ -346,6 +407,54 @@ mod poller {
         }
     }
 }
+
+
+// pub fn read<F>(fd: i32, mut f: F) -> bool where F: FnMut(&str, entry) -> bool {
+//     let (mut offset, mut isquote) = (0, false);
+//     let mut buffer = alloc::string::String::new();
+
+//     let mut b: u8 = 0;
+//     let wilds = ['\r', '\t', ' ', '[', ']'];
+
+//     let mut is_error = false;
+
+//     loop {
+//         if syscall!(read(fd as i32, &mut b as *mut _ as *mut libc::c_void, 1)) == Ok(0) { 
+//             b = 0;
+//         }
+
+//         match b as char {
+//             '\0' | '\n' if !isquote => {
+//                 if let Some((key, value)) = buffer.split_once('=') {
+//                     if f(key, if value.contains('\'') {
+//                         entry::multiple(value.split('\''))
+//                     } else {
+//                         entry::single(value)
+//                     }) == false {
+//                         is_error = false
+//                     }
+//                     buffer.drain(offset..);
+//                 } else if buffer.len() > 0 {
+//                     if offset != buffer.len() {
+//                         buffer.drain(..offset);
+//                         buffer.push('.')
+//                     }
+//                     offset = buffer.len()
+//                 }
+
+//                 if b == 0 { break; }
+//             },
+
+//             '\'' => isquote = !isquote,
+//             ',' if !isquote => buffer.push('\''),
+//             _ if wilds.contains(&(b as char)) && !isquote => continue,
+//             _ => buffer.push(b as char),
+
+//         }
+//     }
+
+//     is_error
+// }
 
 // // Slab Array
 // #[derive(Debug)]
